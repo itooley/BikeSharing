@@ -1,0 +1,323 @@
+---
+title: "BikeSharing"
+author: "Isabelle Tooley"
+date: "7/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(caret)
+library(beepr)
+library(bestglm)
+library(pushoverr)
+library(ranger)
+```
+
+
+```{r}
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+
+summary(train)
+summary(test)
+```
+
+
+Some factors in train set not present in test set. Probably won't include CASUAL and REGISTERED in any models.... it's information about the people who rented, not the conditions under which they did.
+```{r}
+colnames(train)[!(colnames(train) %in% colnames(test))]
+```
+
+```{r}
+train$datetime <- as_datetime(train$datetime)
+test$datetime <- as_datetime(test$datetime)
+
+train$season <- as.factor(train$season)
+test$season <- as.factor(test$season)
+
+train$holiday <- as.factor(train$holiday)
+test$holiday <- as.factor(test$holiday)
+
+train$workingday <- as.factor(train$workingday)
+test$workingday <- as.factor(test$workingday)
+
+train$weather <- as.factor(train$weather)
+test$weather <- as.factor(test$weather)
+```
+
+
+Seasonal rentals
+```{r}
+seasonal <- train %>%
+  group_by(season) %>%
+  summarise(num_rentals = sum(count))
+
+ggplot(data = seasonal, aes(x = season, y = num_rentals)) +
+  geom_bar(position = "dodge", aes(fill = season), stat = "identity") + 
+  theme(legend.title = element_blank(), axis.title.y = element_blank())
+```
+
+Daily rentals
+```{r}
+daily <- train %>%
+  group_by(day = floor_date(datetime, unit = "day")) %>%
+  summarise(num_rentals = sum(count))
+casual_rents <- train %>%
+  group_by(day = floor_date(datetime, unit = "day")) %>%
+  summarise(num_rentals = sum(casual))
+registered_rents <- train %>%
+  group_by(day = floor_date(datetime, unit = "day")) %>%
+  summarise(num_rentals = sum(registered))
+
+ggplot() +
+  geom_line(data = daily, aes(x = day, y = num_rentals)) +
+  geom_line(data = casual_rents, aes(x = day, y = num_rentals), col = "cornflowerblue") +
+  geom_line(data = registered_rents, aes(x = day, y = num_rentals), col = "firebrick")
+```
+
+
+```{r}
+library(corrplot)
+quant_vars <- train %>% 
+  select(temp, atemp, humidity, windspeed, count)
+
+corrplot(cor(quant_vars), method = "color", type = "upper", diag = FALSE, addCoef.col = "black", number.digits = 2)
+```
+
+
+```{r}
+ggplot(data = train, aes(temp)) + 
+  geom_histogram(aes(fill = ..count..)) + 
+  scale_fill_gradient("Count", low = "Steelblue", high = "firebrick") +
+  labs(title = "Histogram for temp") +
+  labs(x = "temp", y = "Count")
+
+ggplot(data = train, aes(atemp)) + 
+  geom_histogram(aes(fill = ..count..)) + 
+  scale_fill_gradient("Count", low = "Steelblue", high = "firebrick") +
+  labs(title = "Histogram for atemp") +
+  labs(x = "atemp", y = "Count")
+
+ggplot(data = train, aes(humidity)) + 
+  geom_histogram(aes(fill = ..count..)) + 
+  scale_fill_gradient("Count", low = "Steelblue", high = "firebrick") +
+  labs(title = "Histogram for humidity") +
+  labs(x = "humidity", y = "Count")
+
+ggplot(data = train, aes(sqrt(windspeed))) + 
+  geom_histogram(aes(fill = ..count..)) + 
+  scale_fill_gradient("Count", low = "Steelblue", high = "firebrick") +
+  labs(title = "Histogram for windspeed") +
+  labs(x = "windspeed", y = "Count")
+
+ggplot(data = train, aes(count)) + 
+  geom_histogram(aes(fill = ..count..)) + 
+  scale_fill_gradient("Count", low = "Steelblue", high = "firebrick") +
+  labs(title = "Histogram for rentals") +
+  labs(x = "rentals", y = "Count")
+```
+
+
+
+```{r}
+ggplot(train, aes(as.factor(hour(datetime)), count)) +
+  geom_boxplot(aes(fill = as.factor(hour(datetime))), outlier.color = "black") +
+  xlab("hour") +
+  ylab("count")
+
+ggplot(train, aes(as.factor(day(datetime)), count)) +
+  geom_boxplot(aes(fill = as.factor(day(datetime))), outlier.color = "black") +
+  xlab("day") +
+  ylab("count")
+
+ggplot(train, aes(season, count)) +
+  geom_boxplot(aes(fill = season), outlier.color = "black") +
+  xlab("season") +
+  ylab("count")
+
+ggplot(train, aes(holiday, count)) +
+  geom_boxplot(aes(fill = holiday), outlier.color = "black") +
+  xlab("holiday") +
+  ylab("count")
+
+ggplot(train, aes(workingday, count)) +
+  geom_boxplot(aes(fill = workingday), outlier.color = "black") +
+  xlab("workingday") +
+  ylab("count")
+
+ggplot(train, aes(weather, count)) +
+  geom_boxplot(aes(fill = weather), outlier.color = "black") +
+  xlab("weather") +
+  ylab("count")
+```
+
+
+```{r}
+train <- train %>%
+  mutate(hour = as.factor(hour(datetime))) %>%
+  select(-registered, -casual)
+
+test <- test %>%
+  mutate(hour = as.factor(hour(datetime)))
+```
+
+
+```{r}
+hourly <- train %>%
+  group_by(workingday, hour) %>%
+  summarise(num_rentals = sum(count))
+
+ggplot(hourly, aes(hour, num_rentals)) +
+  geom_bar(aes(fill = workingday), stat = "identity", position = "dodge", width = 0.5)
+```
+
+
+
+
+*MODELING*
+
+setup for pushoverr notifications
+```{r}
+userID <- "utfho6rs7hyxtd7s4om34s2654z7hi"
+appToken <- "a2757wi2xyqim3siowv13h6rpkgh72"
+msg <- "Model training complete"
+```
+
+
+Poisson regression
+```{r}
+set.seed(80109)
+
+poisson_fit <- glm(count ~ ., data = train, family = "poisson")
+poisson_preds = predict(poisson_fit, test, type = "response", se.fit=TRUE)
+pois <- data.frame(datetime = test$datetime, count = round(poisson_preds$fit))
+
+write.csv(pois, file='possion_preds.csv', row.names = FALSE)
+
+summary(poisson_fit)
+
+#send push notification
+pushover(message = msg,
+         user = userID,
+         app = appToken)
+```
+
+
+Poisson regression, with sqrt transformation on windspeed variable
+```{r}
+set.seed(80109)
+
+trans_test <- test
+trans_test$windspeed <- sqrt(trans_test$windspeed)
+
+trans_train <- train
+trans_train$windspeed <- sqrt(trans_train$windspeed)
+
+trans_poisson_fit <- glm(count ~ ., data = trans_train, family = "poisson")
+trans_poisson_preds = predict(trans_poisson_fit, trans_test , type = "response", se.fit=TRUE)
+trans_pois <- data.frame(datetime = trans_test$datetime, count = round(trans_poisson_preds$fit))
+
+write.csv(pois, file='transformed_poisson_preds.csv', row.names = FALSE)
+
+summary(trans_poisson_fit)
+
+#send push notification
+pushover(message = msg,
+         user = userID,
+         app = appToken)
+```
+
+
+Random Forest
+```{r}
+set.seed(80109)
+
+myControl <- trainControl(method = "repeatedcv",
+                          number = 10)
+
+grid <- expand.grid("mtry" = seq(3, 10), splitrule = "extratrees", min.node.size = seq(5, 50, 5))
+
+rf.model <- train(count ~ .,
+                  data = train, 
+                  method = "ranger",
+                  trControl = myControl,
+                  tuneGrid = grid,
+                  metric = "RMSE",
+                  preProcess = c("zv", "center", "scale"))
+rf.model
+
+rf.preds <- predict(rf.model, test)
+rf <- data.frame(datetime = test$datetime, count = round(rf.preds))
+write.csv(rf, "rf_preds.csv", row.names = FALSE)
+
+#send push notification
+pushover(message = msg,
+         user = userID,
+         app = appToken)
+```
+
+
+Note: the first predictions using gradient boosting regression trees produced some negative predictions, which aren't in the response variable sample space. This could be because gradient boosting successively fits trees to the residuals of the previous iteration. So if some trees from the previous round predict a value that is above the target value, the new trees will be trained using residuals that include negative values, which can explain why some trees will produce negative predictions.
+To fix this, transform the response variable so it is impossible for negative values to be impossible. Un-transforming a log or sqrt'ed value will always result in a positive value.
+
+```{r}
+train <- train %>%
+  mutate(month = as.factor(month(datetime))) %>%
+  mutate(year = as.factor(year(datetime)))
+
+test <- test %>%
+  mutate(month = as.factor(month(datetime))) %>%
+  mutate(year = as.factor(year(datetime)))
+```
+
+```{r}
+set.seed(80109)
+
+#original tune grid
+# tunegrid <- expand.grid(eta = c(.25, .30, .35),
+#                         max_depth = c(3, 5, 10),
+#                         colsample_bytree = .9,
+#                         subsample = .8,
+#                         nrounds = 100,
+#                         min_child_weight = c(1,5),
+#                         gamma = .075)
+#The final values used for the model were nrounds = 100, max_depth = 10, eta = 0.25, 
+#gamma = 0.075, colsample_bytree = 0.9, min_child_weight = 5 and subsample = 0.8.
+
+#nrounds = 100, max_depth = 12, eta = 0.2, gamma = 0,
+#colsample_bytree = 0.6, min_child_weight = 12 and subsample = 0.8.
+
+tunegrid <- expand.grid(eta = c(0.20, 0.225, 0.25),
+                        max_depth = c(8, 10, 12),
+                        colsample_bytree = c(0.6, 0.7),
+                        subsample = .8,
+                        nrounds = 100,
+                        min_child_weight = 10,
+                        gamma = c(0, 0.05, .075, 0.1))
+
+xgbTree.model <- train(count ~.,
+                   data = train %>% mutate(count = log(count)),
+                   method = "xgbTree",
+                   tuneGrid = tunegrid,
+                   trControl = myControl,
+                   metric = "RMSE",
+                   preProc = c("zv", "center", "scale")
+)
+
+xgbTree.model
+
+preds <- exp(predict(xgbTree.model, test))
+xgbTree <- data.frame(datetime = test$datetime, count = round(preds))
+write.csv(xgbTree, "xgb_preds3.csv", row.names = FALSE)
+
+#send push notification
+pushover(message = msg,
+         user = userID,
+         app = appToken)
+```
+
+
